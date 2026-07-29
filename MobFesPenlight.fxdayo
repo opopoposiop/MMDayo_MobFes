@@ -19,6 +19,7 @@
 //   PMX生成側の INSTANCE_COUNT / vertices_per_instance を変えた場合は、
 //   下記 MOB_INSTANCE_COUNT / MOB_VERTICES_PER_INSTANCE も同時に合わせる。
 //   4色の割当はPMX面材質で確定済みのため、このデフォーマでは変更しない。
+//   変更後は validate_mob_fes_penlight.mjs を実行し、VALIDになることを確認する。
 // =============================================================================
 
 #include <yrz.hlsli>
@@ -52,26 +53,35 @@
 
 // =============================================================================
 // ユーザーが変更してよい箇所
-// 数字だけを変更すれば、モーフ0のときの基準値を調整できる。
+// HOW: 右端の数字だけを変更すると、モーフ0のときの基準値を調整できる。
+// 名前（USER_から始まる部分）や行そのものは変更しない。
 // =============================================================================
+// HOW: テンポモーフの最小値と最大値をBPMで指定する。
 #define USER_TEMPO_MIN_BPM         60.0
 #define USER_TEMPO_MAX_BPM        240.0
+// HOW: ペンライトを配置する会場の横幅と奥行、およびモーフ最大時の倍率を指定する。
 #define USER_AREA_WIDTH           113.137
 #define USER_AREA_DEPTH            79.196
 #define USER_AREA_MORPH_MAX_SCALE   3.0
+// HOW: 観客がペンライトを持つ基準の高さを指定する。
 #define USER_HAND_HEIGHT            1.55
+// HOW: 左右の振り幅と、静止時にも残す傾きをラジアンで指定する。
 #define USER_BASE_SWING_RAD          0.72
 #define USER_BASE_LEAN_RAD           0.10
+// HOW: X・Y・Z軸ごとの動きを基準振幅の何倍にするか指定する。
 #define USER_SWING_X_SCALE            3.0
 #define USER_SWING_Y_SCALE            5.0
 #define USER_SWING_Z_SCALE            3.0
+// HOW: ジャンプの落下速度と、画面上での上下動の大きさを指定する。
 #define USER_GRAVITY_ACCELERATION     9.80665
 #define USER_Y_BOB_GRAVITY_SCALE      0.40
 
 
 // =============================================================================
 // ユーザー変更不可の箇所
-// PMXの頂点配置と1対1で対応しているため、単独変更すると形が崩れる。
+// Why not: PMXの頂点配置と1対1で対応しているため、ここだけを変更すると
+//          形状崩れ、表示欠け、GPU書き込み範囲の不一致が起きる。
+// Codex用覚書: 変更が必要な場合はPMX生成コード側も同時に直し、必ず検証する。
 // =============================================================================
 #define MOB_INSTANCE_COUNT               4000
 #define MOB_VERTICES_PER_INSTANCE          26
@@ -348,7 +358,7 @@ void CS(uint3 id : SV_DispatchThreadID)
     float facing;
     MobAngles(instanceIndex, randomValue, swingX, swingZ, facing);
 
-    // 形状、法線、接線へ同じ回転順を使うHOW。照明だけが取り残されるのを防ぐ。
+    // HOW: 形状、法線、接線へ同じ回転順を使い、照明だけが取り残されるのを防ぐ。
     vertex.position = MobRotateY(MobRotateX(MobRotateZ(vertex.position, swingZ), swingX), facing);
     vertex.normal = normalize(MobRotateY(MobRotateX(MobRotateZ(vertex.normal, swingZ), swingX), facing));
     vertex.tangent = normalize(MobRotateY(MobRotateX(MobRotateZ(vertex.tangent, swingZ), swingX), facing));
