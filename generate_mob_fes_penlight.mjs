@@ -18,7 +18,17 @@ import { fileURLToPath } from "node:url";
 // fxdayo側のMOB_INSTANCE_COUNTと総頂点数も必ず同時に変更する。
 const INSTANCE_COUNT = 4000;
 const SEGMENTS = 6;
-const OUTPUT_NAME = "MobFesPenlight.pmx";
+// HOW: 引数で通常版、演算共有版、ビルボード版の出力先を切り替える。
+const OPTIMIZED_VARIANT = process.argv.includes("--optimized");
+const BILLBOARD_VARIANT = process.argv.includes("--billboard");
+if (OPTIMIZED_VARIANT && BILLBOARD_VARIANT) {
+  throw new Error("--optimized と --billboard は同時に指定できません");
+}
+const OUTPUT_NAME = BILLBOARD_VARIANT
+  ? "MobFesPenlight_3.pmx"
+  : OPTIMIZED_VARIANT
+    ? "MobFesPenlight_2.pmx"
+    : "MobFesPenlight.pmx";
 
 
 // =============================================================================
@@ -30,6 +40,14 @@ const OUTPUT_NAME = "MobFesPenlight.pmx";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUTPUT_PATH = path.join(HERE, OUTPUT_NAME);
+// HOW: ボーン追加時の番号ずれを、頂点ウェイト・モーフ・表示枠へ一括反映する。
+const BONE_INDEX = Object.freeze({
+  ROOT: 0,
+  CENTER: 1,
+  CONTROL: 2,
+  PENLIGHT_A: 3,
+  PENLIGHT_B: 4,
+});
 // HOW: 4系統を初期状態から別色にし、モーフ0でも4色同時表示にする。
 const GLOW_GROUPS = [
   { jp: "色1", en: "Color1", baseRgb: [0.05, 1.0, 0.12] },
@@ -164,8 +182,85 @@ function cylinderMesh({
 }
 
 
+// HOW: 遠景用に、持ち手または発光部を4頂点・2三角形の板として作る。
+function billboardQuadMesh({
+  halfWidth,
+  yBottom,
+  yTop,
+  depthOffset,
+  bone,
+}) {
+  return {
+    vertices: [
+      { position: [-halfWidth, yBottom, depthOffset], normal: [0, 0, 1], uv: [0, 1], bone },
+      { position: [halfWidth, yBottom, depthOffset], normal: [0, 0, 1], uv: [1, 1], bone },
+      { position: [-halfWidth, yTop, depthOffset], normal: [0, 0, 1], uv: [0, 0], bone },
+      { position: [halfWidth, yTop, depthOffset], normal: [0, 0, 1], uv: [1, 0], bone },
+    ],
+    triangles: [[0, 1, 2], [1, 3, 2]],
+  };
+}
+
+
+// HOW: 1本8頂点・4三角形に抑え、4000本でもBLAS更新量を小さくする。
+function buildBillboardGeometry() {
+  const vertices = [];
+  const handleIndices = [];
+  const glowIndicesByGroup = GLOW_GROUPS.map(() => []);
+  let verticesPerInstance = 0;
+  const variants = [
+    {
+      handleHalfWidth: 0.16, handleBottom: -0.38, handleTop: 0.34,
+      glowHalfWidth: 0.115, glowBottom: 0.28, glowTop: 2.72,
+    },
+    {
+      handleHalfWidth: 0.18, handleBottom: -0.42, handleTop: 0.32,
+      glowHalfWidth: 0.105, glowBottom: 0.26, glowTop: 3.02,
+    },
+  ];
+
+  for (let instance = 0; instance < INSTANCE_COUNT; instance += 1) {
+    const variantIndex = instance & 1;
+    const p = variants[variantIndex];
+    const bone = BONE_INDEX.PENLIGHT_A + variantIndex;
+    const instanceStart = vertices.length;
+    const handle = billboardQuadMesh({
+      halfWidth: p.handleHalfWidth,
+      yBottom: p.handleBottom,
+      yTop: p.handleTop,
+      depthOffset: -0.003,
+      bone,
+    });
+    vertices.push(...handle.vertices);
+    for (const face of handle.triangles) {
+      for (const index of face) handleIndices.push(instanceStart + index);
+    }
+
+    const glowStart = vertices.length;
+    const glow = billboardQuadMesh({
+      halfWidth: p.glowHalfWidth,
+      yBottom: p.glowBottom,
+      yTop: p.glowTop,
+      depthOffset: 0.003,
+      bone,
+    });
+    vertices.push(...glow.vertices);
+    const glowIndices = glowIndicesByGroup[instance % GLOW_GROUPS.length];
+    for (const face of glow.triangles) {
+      for (const index of face) glowIndices.push(glowStart + index);
+    }
+
+    const count = vertices.length - instanceStart;
+    if (instance === 0) verticesPerInstance = count;
+    if (count !== verticesPerInstance) throw new Error("2種類のビルボード頂点数が一致していません");
+  }
+  return { vertices, handleIndices, glowIndicesByGroup, verticesPerInstance };
+}
+
+
 // HOW: 2種類を交互に割り当て、4000本分の描画スロットを構築する。
 function buildGeometry() {
+  if (BILLBOARD_VARIANT) return buildBillboardGeometry();
   const vertices = [];
   const handleIndices = [];
   const glowIndicesByGroup = GLOW_GROUPS.map(() => []);
@@ -184,7 +279,7 @@ function buildGeometry() {
   for (let instance = 0; instance < INSTANCE_COUNT; instance += 1) {
     const variantIndex = instance & 1;
     const p = variants[variantIndex];
-    const bone = 2 + variantIndex;
+    const bone = BONE_INDEX.PENLIGHT_A + variantIndex;
     const instanceStart = vertices.length;
     const handle = cylinderMesh({
       radiusBottom: p.handleR,
@@ -316,7 +411,7 @@ function controlMorph(nameJp, nameEn) {
     panel: 4,
     type: 2,
     items: [{
-      bone: 1,
+      bone: BONE_INDEX.CONTROL,
       translation: [0, 0, 0],
       rotation: [0, 0, 0, 1],
     }],
@@ -487,10 +582,13 @@ function generate() {
     })),
   ];
   const bones = [
-    { nameJp: "全ての親", nameEn: "Root", position: [0, 0, 0], parent: -1, flags: 0x001a, tailOffset: [0, 1, 0] },
-    { nameJp: "制御", nameEn: "Control", position: [0, 0, 0], parent: 0, flags: 0x0018, tailOffset: [0, 1, 0] },
-    { nameJp: "ペンライトA", nameEn: "PenlightA", position: [0, 0, 0], parent: 0, flags: 0x001a, tailOffset: [0, 1, 0] },
-    { nameJp: "ペンライトB", nameEn: "PenlightB", position: [0, 0, 0], parent: 0, flags: 0x001a, tailOffset: [0, 1, 0] },
+    // HOW: 全ての親とセンターは、回転・移動・表示・操作を許可する。
+    { nameJp: "全ての親", nameEn: "Root", position: [0, 0, 0], parent: -1, flags: 0x001e, tailOffset: [0, 1, 0] },
+    { nameJp: "センター", nameEn: "Center", position: [0, 0, 0], parent: BONE_INDEX.ROOT, flags: 0x001e, tailOffset: [0, 1, 0] },
+    // Why not: 制御ボーンはfxdayoへモーフ値を渡すだけなので、手動移動は許可しない。
+    { nameJp: "制御", nameEn: "Control", position: [0, 0, 0], parent: BONE_INDEX.CENTER, flags: 0x0018, tailOffset: [0, 1, 0] },
+    { nameJp: "ペンライトA", nameEn: "PenlightA", position: [0, 0, 0], parent: BONE_INDEX.CENTER, flags: 0x001a, tailOffset: [0, 1, 0] },
+    { nameJp: "ペンライトB", nameEn: "PenlightB", position: [0, 0, 0], parent: BONE_INDEX.CENTER, flags: 0x001a, tailOffset: [0, 1, 0] },
   ];
 
   const writer = new BinaryWriter();
@@ -498,10 +596,26 @@ function generate() {
   writer.f32(2.0);
   writer.u8(8);
   writer.bytes(Buffer.from([0, 0, 4, 1, 1, 1, 1, 1]));
-  writer.text("モブフェス・ペンライト4000");
-  writer.text("MobFesPenlight");
-  writer.text("観客の身体を含まないペンライト専用モデル。同名fxdayoを適用してください。");
-  writer.text("Penlight-only crowd model. Apply the matching fxdayo in MikuMikuDayo.");
+  writer.text(BILLBOARD_VARIANT
+    ? "モブフェス・ペンライト4000 ビルボード軽量版"
+    : OPTIMIZED_VARIANT
+      ? "モブフェス・ペンライト4000 高速化版"
+      : "モブフェス・ペンライト4000");
+  writer.text(BILLBOARD_VARIANT
+    ? "MobFesPenlight_3"
+    : OPTIMIZED_VARIANT
+      ? "MobFesPenlight_2"
+      : "MobFesPenlight");
+  writer.text(BILLBOARD_VARIANT
+    ? "遠景向けビルボード軽量版。同名のMobFesPenlight_3.fxdayoを適用してください。"
+    : OPTIMIZED_VARIANT
+      ? "GPU負荷軽減版。同名のMobFesPenlight_2.fxdayoを適用してください。"
+      : "観客の身体を含まないペンライト専用モデル。同名fxdayoを適用してください。");
+  writer.text(BILLBOARD_VARIANT
+    ? "Billboard low-load edition. Apply MobFesPenlight_3.fxdayo."
+    : OPTIMIZED_VARIANT
+      ? "GPU-optimized edition. Apply MobFesPenlight_2.fxdayo."
+      : "Penlight-only crowd model. Apply the matching fxdayo in MikuMikuDayo.");
 
   writer.i32(geometry.vertices.length);
   for (const vertex of geometry.vertices) {
@@ -526,8 +640,10 @@ function generate() {
   writer.i32(morphs.length);
   for (const morph of morphs) writeMorph(writer, morph);
 
-  writer.i32(8);
-  writeDisplayFrame(writer, "Root", "Root", 1, [[0, 0]]);
+  writer.i32(9);
+  writeDisplayFrame(writer, "Root", "Root", 1, [[0, BONE_INDEX.ROOT]]);
+  // HOW: センターボーンを独立枠に表示し、MMD上で選択して移動できるようにする。
+  writeDisplayFrame(writer, "センター", "Center", 0, [[0, BONE_INDEX.CENTER]]);
   writeDisplayFrame(
     writer,
     "表情",
@@ -555,7 +671,13 @@ function generate() {
       [1, 50], [1, 51], [1, 52], [1, 53], [1, 54], [1, 55],
     ],
   );
-  writeDisplayFrame(writer, "ペンライト", "Penlight", 0, [[0, 2], [0, 3]]);
+  writeDisplayFrame(
+    writer,
+    "ペンライト",
+    "Penlight",
+    0,
+    [[0, BONE_INDEX.PENLIGHT_A], [0, BONE_INDEX.PENLIGHT_B]],
+  );
 
   writer.i32(0);
   writer.i32(0);

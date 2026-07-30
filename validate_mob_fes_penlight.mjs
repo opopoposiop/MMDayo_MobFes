@@ -1,5 +1,5 @@
 /**
- * What: MobFesPenlight.pmx と MobFesPenlight.fxdayo の対応関係を検査する。
+ * What: 通常版とGPU負荷軽減版のPMX・fxdayo対応関係を検査する。
  * 非エンジニア向けには、最後に「VALID」と表示されれば配布可能な状態。
  */
 
@@ -11,9 +11,29 @@ import { fileURLToPath } from "node:url";
 // =============================================================================
 // ユーザーが変更してよい箇所
 // =============================================================================
-// What: 成果物名を変更した場合だけ、次の2行を同じ名前へ変更する。
-const PMX_NAME = "MobFesPenlight.pmx";
-const FX_NAME = "MobFesPenlight.fxdayo";
+// What: 成果物名を変更した場合だけ、対応する組の名前を一緒に変更する。
+const ARTIFACTS = [
+  {
+    name: "通常版",
+    pmxName: "MobFesPenlight.pmx",
+    fxName: "MobFesPenlight.fxdayo",
+    optimized: false,
+  },
+  {
+    name: "GPU負荷軽減版",
+    pmxName: "MobFesPenlight_2.pmx",
+    fxName: "MobFesPenlight_2.fxdayo",
+    optimized: true,
+    billboard: false,
+  },
+  {
+    name: "ビルボード軽量版",
+    pmxName: "MobFesPenlight_3.pmx",
+    fxName: "MobFesPenlight_3.fxdayo",
+    optimized: true,
+    billboard: true,
+  },
+];
 
 
 // =============================================================================
@@ -134,20 +154,21 @@ function parsePmx(filename) {
 
   const vertexCount = reader.i32();
   assert(vertexCount > 0, "頂点がありません");
+  const weightedBoneIndices = new Set();
   for (let i = 0; i < vertexCount; i += 1) {
     reader.skip(12 + 12 + 8 + additionalUv * 16);
     const weightType = reader.u8();
-    if (weightType === 0) reader.index(boneIndexSize);
+    if (weightType === 0) weightedBoneIndices.add(reader.index(boneIndexSize));
     else if (weightType === 1) {
-      reader.index(boneIndexSize);
-      reader.index(boneIndexSize);
+      weightedBoneIndices.add(reader.index(boneIndexSize));
+      weightedBoneIndices.add(reader.index(boneIndexSize));
       reader.skip(4);
     } else if (weightType === 2 || weightType === 4) {
-      for (let j = 0; j < 4; j += 1) reader.index(boneIndexSize);
+      for (let j = 0; j < 4; j += 1) weightedBoneIndices.add(reader.index(boneIndexSize));
       reader.skip(16);
     } else if (weightType === 3) {
-      reader.index(boneIndexSize);
-      reader.index(boneIndexSize);
+      weightedBoneIndices.add(reader.index(boneIndexSize));
+      weightedBoneIndices.add(reader.index(boneIndexSize));
       reader.skip(4 + 36);
     } else {
       throw new Error(`未対応のウェイト種別: ${weightType}`);
@@ -198,12 +219,13 @@ function parsePmx(filename) {
   assert(materialIndexTotal === indexCount, "材質ごとの面索引数合計が一致しません");
 
   const boneCount = reader.i32();
+  const bones = [];
   for (let i = 0; i < boneCount; i += 1) {
-    reader.text(encoding);
-    reader.text(encoding);
-    reader.skip(12);
-    reader.index(boneIndexSize);
-    reader.skip(4);
+    const name = reader.text(encoding);
+    const nameEn = reader.text(encoding);
+    const position = reader.f32Array(3);
+    const parent = reader.index(boneIndexSize);
+    const transformLayer = reader.i32();
     const flags = reader.u16();
     if (flags & 0x0001) reader.index(boneIndexSize);
     else reader.skip(12);
@@ -224,6 +246,7 @@ function parsePmx(filename) {
         if (reader.u8()) reader.skip(24);
       }
     }
+    bones.push({ name, nameEn, position, parent, transformLayer, flags });
   }
 
   const morphCount = reader.i32();
@@ -259,15 +282,19 @@ function parsePmx(filename) {
   }
 
   const displayCount = reader.i32();
+  const displayFrames = [];
   for (let i = 0; i < displayCount; i += 1) {
-    reader.text(encoding);
-    reader.text(encoding);
-    reader.u8();
+    const name = reader.text(encoding);
+    const nameEn = reader.text(encoding);
+    const special = reader.u8();
     const elementCount = reader.i32();
+    const elements = [];
     for (let j = 0; j < elementCount; j += 1) {
       const type = reader.u8();
-      reader.index(type === 0 ? boneIndexSize : morphIndexSize);
+      const index = reader.index(type === 0 ? boneIndexSize : morphIndexSize);
+      elements.push({ type, index });
     }
+    displayFrames.push({ name, nameEn, special, elements });
   }
 
   const rigidCount = reader.i32();
@@ -296,11 +323,52 @@ function parsePmx(filename) {
     materialCount,
     materials,
     boneCount,
+    bones,
+    weightedBoneIndices: [...weightedBoneIndices].sort((a, b) => a - b),
     morphCount,
     morphNames,
     morphPanels,
+    displayFrames,
     bytes: reader.buffer.length,
   };
+}
+
+
+// What: 全ての親とセンターが移動可能で、全頂点へ親子階層が伝播するか検査する。
+function validateMovableBones(pmx) {
+  const rootIndex = pmx.bones.findIndex((bone) => bone.name === "全ての親");
+  const centerIndex = pmx.bones.findIndex((bone) => bone.name === "センター");
+  const controlIndex = pmx.bones.findIndex((bone) => bone.name === "制御");
+  const penlightIndices = ["ペンライトA", "ペンライトB"]
+    .map((name) => pmx.bones.findIndex((bone) => bone.name === name));
+
+  assert(rootIndex >= 0, "「全ての親」ボーンがありません");
+  assert(centerIndex >= 0, "「センター」ボーンがありません");
+  assert(controlIndex >= 0, "「制御」ボーンがありません");
+  assert(penlightIndices.every((index) => index >= 0), "ペンライト用ボーンが不足しています");
+  assert(pmx.bones[rootIndex].parent === -1, "「全ての親」が最上位ボーンではありません");
+  assert(pmx.bones[centerIndex].parent === rootIndex, "「センター」が「全ての親」の子ではありません");
+  assert(pmx.bones[controlIndex].parent === centerIndex, "「制御」が「センター」の子ではありません");
+  for (const index of penlightIndices) {
+    assert(pmx.bones[index].parent === centerIndex,
+      `${pmx.bones[index].name}が「センター」の子ではありません`);
+  }
+
+  const movableFlags = 0x001e;
+  for (const index of [rootIndex, centerIndex]) {
+    assert((pmx.bones[index].flags & movableFlags) === movableFlags,
+      `${pmx.bones[index].name}に回転・移動・表示・操作許可がありません`);
+  }
+  assert(pmx.weightedBoneIndices.length === 2
+    && penlightIndices.every((index) => pmx.weightedBoneIndices.includes(index)),
+  "全頂点がペンライト用ボーンへ正しく割り当てられていません");
+
+  const rootFrame = pmx.displayFrames.find((frame) => frame.name === "Root");
+  const centerFrame = pmx.displayFrames.find((frame) => frame.name === "センター");
+  assert(rootFrame?.elements.some((element) => element.type === 0 && element.index === rootIndex),
+    "Root表示枠に「全ての親」がありません");
+  assert(centerFrame?.elements.some((element) => element.type === 0 && element.index === centerIndex),
+    "センター表示枠に「センター」ボーンがありません");
 }
 
 
@@ -341,7 +409,7 @@ function validateMmdDayoAl(pmx) {
 
 
 // What: YRZFX JSONが構文上正しく、PMXの制御モーフを正しく参照するか確認する。
-function parseFx(filename, pmx) {
+function parseFx(filename, pmx, optimized, billboard = false) {
   const source = fs.readFileSync(filename, "utf8");
   const match = source.match(/\[YRZFX\]\s*([\s\S]*?)\s*\[HLSL\]/);
   assert(match, "YRZFX JSONブロックがありません");
@@ -399,9 +467,78 @@ function parseFx(filename, pmx) {
   for (const phaseName of ["crouchEnd", "takeoffPhase", "landingPhase", "landingCrouchEnd"]) {
     assert(source.includes(phaseName), `人間型ジャンプに${phaseName}段階がありません`);
   }
-  assert(source.includes("Dayo::DefaultSkinning"), "標準スキニング処理がありません");
+  const placementExpression = optimized
+    ? "vertex.position += G_InstancePosition"
+    : "vertex.position += MobPosition";
+  const placementIndex = source.indexOf(placementExpression);
+  const skinningIndex = source.indexOf("Dayo::LBS(vertex, Dayo::Skin[vertexIndex], 1)");
+  assert(source.includes("Dayo::VB[vertexIndex]"), "ボーン変換前の頂点を読み込んでいません");
+  assert(placementIndex >= 0 && skinningIndex > placementIndex,
+    "会場配置後にボーンスキニングを適用していません");
+  if (!billboard) {
+    assert(source.includes("YRZ::ComputeTBN(vertex.normal)"),
+      "ボーン変換前の接線を初期化していません");
+  }
   assert(source.includes("Dayo::OutBuf"), "変形結果の出力処理がありません");
+
+  if (optimized) {
+    // What: 26頂点の個体計算共有と三角関数キャッシュが有効か検査する。
+    const mainPass = metadata.fx.passes.find((pass) => pass.name === "Main");
+    assert(mainPass?.numthreads?.x === verticesPerInstance,
+      "高速化版のスレッドグループ幅が1本分の頂点数と一致しません");
+    assert(totalVertexCount % mainPass.numthreads.x === 0,
+      "高速化版の総頂点数がスレッドグループ幅で割り切れません");
+    assert(source.includes("SV_GroupThreadID"), "高速化版がグループ内頂点番号を使用していません");
+    assert(source.includes("groupshared float3 G_InstancePosition"),
+      "高速化版に個体位置の共有領域がありません");
+    assert(source.includes("GroupMemoryBarrierWithGroupSync"),
+      "高速化版に共有値の同期処理がありません");
+    assert(source.includes("groupThreadId.x == 0u"),
+      "高速化版が個体計算をグループ先頭へ限定していません");
+    assert((source.match(/sincos\(/g) ?? []).length === 3,
+      "高速化版の回転三角関数がX・Y・Zの3回に集約されていません");
+    if (!billboard) {
+      assert((source.match(/MobRotateCached\(vertex\./g) ?? []).length === 3,
+        "高速化版が位置・法線・接線で共有回転値を再利用していません");
+    }
+    assert(source.includes("if (yBobWeight > 0.0 && motionWeight > 0.0)"),
+      "高速化版がYゆらぎ0の不要なジャンプ計算を省略していません");
+    assert(source.includes("if (C_StopMotion >= 1.0)"),
+      "高速化版が停止中の不要な周期計算を省略していません");
+  }
+
+  if (billboard) {
+    // What: 4000本が8頂点・4三角形のカメラ向き板として構成されるか検査する。
+    assert(verticesPerInstance === 8, "ビルボード版が1本8頂点ではありません");
+    assert(pmx.vertexCount === instanceCount * 8,
+      "ビルボード版の総頂点数が4000本×8頂点ではありません");
+    assert(pmx.indexCount / 3 === instanceCount * 4,
+      "ビルボード版の三角形数が4000本×4ではありません");
+    for (const sharedName of [
+      "G_BillboardRight",
+      "G_BillboardUp",
+      "G_BillboardNormal",
+    ]) {
+      assert(source.includes(`groupshared float3 ${sharedName}`),
+        `ビルボード版に共有基底${sharedName}がありません`);
+    }
+    assert(source.includes("Dayo::CameraForward") && source.includes("Dayo::CameraRight"),
+      "ビルボード版がカメラ方向を参照していません");
+    assert(source.includes("MobRotateCached(")
+      && source.includes("float3(0.0, 1.0, 0.0)"),
+    "ビルボード版の縦軸に振り動作が適用されていません");
+    assert(source.includes("G_BillboardRight * localPosition.x")
+      && source.includes("G_BillboardUp * localPosition.y")
+      && source.includes("G_BillboardNormal * localPosition.z"),
+    "ビルボード版が共有基底から頂点位置を構築していません");
+    assert(source.includes("vertex.normal = G_BillboardNormal")
+      && source.includes("vertex.tangent = G_BillboardRight"),
+    "ビルボード版の法線・接線が板面へ一致していません");
+  }
+
   return {
+    optimized,
+    billboard,
     controllers: metadata.fx.controllers.length,
     instanceCount,
     verticesPerInstance,
@@ -412,12 +549,36 @@ function parseFx(filename, pmx) {
     gravityAcceleration,
     tempoBpm: [tempoMinBpm, tempoMaxBpm],
     swingScale: [swingXScale, swingYScale, swingZScale],
+    instanceEvaluationDivisor: optimized ? verticesPerInstance : 1,
   };
 }
 
 
-const pmx = parsePmx(path.join(HERE, PMX_NAME));
-validateMmdDayoAl(pmx);
-const fx = parseFx(path.join(HERE, FX_NAME), pmx);
+const results = [];
+for (const artifact of ARTIFACTS) {
+  const pmx = parsePmx(path.join(HERE, artifact.pmxName));
+  validateMovableBones(pmx);
+  validateMmdDayoAl(pmx);
+  const fx = parseFx(
+    path.join(HERE, artifact.fxName),
+    pmx,
+    artifact.optimized,
+    artifact.billboard,
+  );
+  results.push({
+    name: artifact.name,
+    files: [artifact.pmxName, artifact.fxName],
+    pmx: {
+      modelName: pmx.modelName,
+      vertexCount: pmx.vertexCount,
+      triangleCount: pmx.indexCount / 3,
+      materialCount: pmx.materialCount,
+      boneCount: pmx.boneCount,
+      morphCount: pmx.morphCount,
+      bytes: pmx.bytes,
+    },
+    fx,
+  });
+}
 console.log("VALID");
-console.log(JSON.stringify({ pmx, fx }, null, 2));
+console.log(JSON.stringify({ artifacts: results }, null, 2));
