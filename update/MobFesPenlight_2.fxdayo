@@ -1,0 +1,445 @@
+// =============================================================================
+// MobFesPenlight_2.fxdayo
+// MikuMikuDayo用：4000本を維持したGPU負荷軽減版ペンライトデフォーマ
+// =============================================================================
+//
+// HOW:
+//   1. MobFesPenlight_2.pmx と同じフォルダへ置く。
+//   2. MikuMikuDayoでPMXを読み込むと、同名の本エフェクトが適用される。
+//   3. PMXの「テンポ」「振幅」「X振幅」「Y振幅」「Z振幅」「Yゆらぎ」、
+//      「ゆらぎ停止」「同調」「ばらつき」「配置幅」「配置奥行」モーフで調整する。
+//   4. 発光色1～4とAL強度はPMX材質モーフで処理し、MMDayo_ALのPPALへ渡す。
+//
+// Why not:
+//   deformエフェクトは実行時に三角形を新規作成できないため、4000本分の軽量な
+//   描画スロットはPMX側に事前確保している。本ファイルは各スロットの座標だけを
+//   GPU上で計算し直す。
+//
+// Codex用覚書:
+//   PMX生成側の INSTANCE_COUNT / vertices_per_instance を変えた場合は、
+//   下記 MOB_INSTANCE_COUNT / MOB_VERTICES_PER_INSTANCE も同時に合わせる。
+//   4色の割当はPMX面材質で確定済みのため、このデフォーマでは変更しない。
+//   26スレッドを1グループにし、1本分の動作計算をgroupsharedで共有する。
+//   変更後は validate_mob_fes_penlight.mjs を実行し、VALIDになることを確認する。
+// =============================================================================
+
+#include <yrz.hlsli>
+#include <resources_deform.hlsli>
+#include <skinning.hlsli>
+
+[YRZFX]
+{
+    "fx": {
+        "cereal_class_version": 0,
+        "category": "deform",
+        "controllers": [
+            { "name":"C_Tempo",     "controllerName":"(self)", "item":"テンポ",   "type":"float" },
+            { "name":"C_Swing",     "controllerName":"(self)", "item":"振幅",     "type":"float" },
+            { "name":"C_XSwingAmp", "controllerName":"(self)", "item":"X振幅",    "type":"float" },
+            { "name":"C_YSwingAmp", "controllerName":"(self)", "item":"Y振幅",    "type":"float" },
+            { "name":"C_ZSwingAmp", "controllerName":"(self)", "item":"Z振幅",    "type":"float" },
+            { "name":"C_YBob",      "controllerName":"(self)", "item":"Yゆらぎ",  "type":"float" },
+            { "name":"C_StopMotion","controllerName":"(self)", "item":"ゆらぎ停止","type":"float" },
+            { "name":"C_Sync",      "controllerName":"(self)", "item":"同調",     "type":"float" },
+            { "name":"C_Random",    "controllerName":"(self)", "item":"ばらつき", "type":"float" },
+            { "name":"C_AreaWidth", "controllerName":"(self)", "item":"配置幅",   "type":"float" },
+            { "name":"C_AreaDepth", "controllerName":"(self)", "item":"配置奥行", "type":"float" }
+        ],
+        "passes": [
+            {
+                "name":"Main",
+                "type":"compute",
+                "computeShader":"CS",
+                "numthreads":{"x":26}
+            }
+        ]
+    }
+}
+[HLSL]
+
+// =============================================================================
+// ユーザーが変更してよい箇所
+// HOW: 右端の数字だけを変更すると、モーフ0のときの基準値を調整できる。
+// 名前（USER_から始まる部分）や行そのものは変更しない。
+// =============================================================================
+// HOW: テンポモーフの最小値と最大値をBPMで指定する。
+#define USER_TEMPO_MIN_BPM         60.0
+#define USER_TEMPO_MAX_BPM        240.0
+// HOW: ペンライトを配置する会場の横幅と奥行、およびモーフ最大時の倍率を指定する。
+#define USER_AREA_WIDTH           113.137
+#define USER_AREA_DEPTH            79.196
+#define USER_AREA_MORPH_MAX_SCALE   3.0
+// HOW: 観客がペンライトを持つ基準の高さを指定する。
+#define USER_HAND_HEIGHT            1.55
+// HOW: 左右の振り幅と、静止時にも残す傾きをラジアンで指定する。
+#define USER_BASE_SWING_RAD          0.72
+#define USER_BASE_LEAN_RAD           0.10
+// HOW: X・Y・Z軸ごとの動きを基準振幅の何倍にするか指定する。
+#define USER_SWING_X_SCALE            3.0
+#define USER_SWING_Y_SCALE            5.0
+#define USER_SWING_Z_SCALE            3.0
+// HOW: ジャンプの落下速度と、画面上での上下動の大きさを指定する。
+#define USER_GRAVITY_ACCELERATION     9.80665
+#define USER_Y_BOB_GRAVITY_SCALE      0.40
+
+
+// =============================================================================
+// ユーザー変更不可の箇所
+// Why not: PMXの頂点配置と1対1で対応しているため、ここだけを変更すると
+//          形状崩れ、表示欠け、GPU書き込み範囲の不一致が起きる。
+// Codex用覚書: 変更が必要な場合はPMX生成コード側も同時に直し、必ず検証する。
+// =============================================================================
+#define MOB_INSTANCE_COUNT               4000
+#define MOB_VERTICES_PER_INSTANCE          26
+#define MOB_TOTAL_VERTEX_COUNT          104000
+
+static const float MOB_PI = 3.14159265358979323846;
+
+
+// HOW: テンポモーフ0～1を60～240 BPMへ線形変換する。
+float MobTempoBpm()
+{
+    return lerp(
+        USER_TEMPO_MIN_BPM,
+        USER_TEMPO_MAX_BPM,
+        saturate(C_Tempo));
+}
+
+
+// HOW: 連番から毎回同じ疑似乱数を作り、保存用テクスチャを不要にする。
+float MobHash(float value)
+{
+    return frac(sin(value * 12.9898 + 78.233) * 43758.5453);
+}
+
+
+// HOW: 1本につき位置、位相、振幅に使う独立した乱数をまとめて作る。
+float4 MobHash4(uint instanceIndex)
+{
+    float seed = (float)instanceIndex + 1.0;
+    return float4(
+        MobHash(seed),
+        MobHash(seed * 1.731 + 11.0),
+        MobHash(seed * 2.417 + 23.0),
+        MobHash(seed * 3.113 + 47.0));
+}
+
+
+// HOW: X軸回転。位置・法線・接線へ同じ式を適用する。
+float3 MobRotateX(float3 value, float angle)
+{
+    float s = sin(angle);
+    float c = cos(angle);
+    return float3(value.x, value.y * c - value.z * s, value.y * s + value.z * c);
+}
+
+
+// HOW: Y軸回転。ペンライトの向きが全員同じになるのを避ける。
+float3 MobRotateY(float3 value, float angle)
+{
+    float s = sin(angle);
+    float c = cos(angle);
+    return float3(value.x * c + value.z * s, value.y, -value.x * s + value.z * c);
+}
+
+
+// HOW: Z軸回転。ライブで腕を左右へ振る主動作を作る。
+float3 MobRotateZ(float3 value, float angle)
+{
+    float s = sin(angle);
+    float c = cos(angle);
+    return float3(value.x * c - value.y * s, value.x * s + value.y * c, value.z);
+}
+
+
+// HOW: 1本につき一度だけ求めたsin/cosを、位置・法線・接線の26頂点で共有する。
+float3 MobRotateCached(
+    float3 value,
+    float3 sineAngles,
+    float3 cosineAngles)
+{
+    float3 rotatedZ = float3(
+        value.x * cosineAngles.z - value.y * sineAngles.z,
+        value.x * sineAngles.z + value.y * cosineAngles.z,
+        value.z);
+    float3 rotatedX = float3(
+        rotatedZ.x,
+        rotatedZ.y * cosineAngles.x - rotatedZ.z * sineAngles.x,
+        rotatedZ.y * sineAngles.x + rotatedZ.z * cosineAngles.x);
+    return float3(
+        rotatedX.x * cosineAngles.y + rotatedX.z * sineAngles.y,
+        rotatedX.y,
+        -rotatedX.x * sineAngles.y + rotatedX.z * cosineAngles.y);
+}
+
+
+// HOW: 同調0/1の端点を保ち、低いモーフ値から効果を感じる減速カーブにする。
+float MobSyncWeight()
+{
+    float x = saturate(C_Sync);
+    return 1.0 - (1.0 - x) * (1.0 - x);
+}
+
+
+// HOW: 角度を最短回転方向で補間し、±π境界での急反転を防ぐ。
+float MobBlendAngle(float fromAngle, float toAngle, float weight)
+{
+    float delta = atan2(
+        sin(toAngle - fromAngle),
+        cos(toAngle - fromAngle));
+    return fromAngle + delta * weight;
+}
+
+
+// HOW: 0～1の周期位相を最短方向で補間し、ジャンプ時刻の飛びを防ぐ。
+float MobBlendCycle(float fromCycle, float toCycle, float weight)
+{
+    float delta = frac(toCycle - fromCycle + 0.5) - 0.5;
+    return frac(fromCycle + delta * weight);
+}
+
+
+// HOW: 各ジャンプ段階のつながりを滑らかにし、急な位置飛びを防ぐ。
+float MobSmoothStep01(float value)
+{
+    float x = saturate(value);
+    return x * x * (3.0 - 2.0 * x);
+}
+
+
+// HOW: 2つの基本モデルを交互にしつつ、個体ごとの癖を合成する。
+void MobAngles(
+    uint instanceIndex,
+    float4 randomValue,
+    out float swingX,
+    out float swingZ,
+    out float facing)
+{
+    float variant = (float)(instanceIndex & 1u);
+    // HOW: 64本単位の小グループを作り、完全同一ではない集団同期にする。
+    // Why not: 全4000本を同位相にすると機械的なコピー動作に見える。
+    float sync = MobSyncWeight();
+    uint syncGroup = (instanceIndex / 64u) % 8u;
+    float groupPhase = ((float)syncGroup / 8.0) * 0.22 * MOB_PI;
+    float bpm = MobTempoBpm();
+    float beatHz = bpm / 60.0;
+    float randomSpeed = lerp(0.84, 1.16, randomValue.z);
+    float speedVariation = lerp(randomSpeed, 1.0, sync);
+    float randomPhase = randomValue.w * 2.0 * MOB_PI + variant * 0.58 * MOB_PI;
+    float concertPhase = groupPhase + variant * 0.12 * MOB_PI;
+    float phase = MobBlendAngle(randomPhase, concertPhase, sync);
+    float t = Dayo::Time * beatHz * speedVariation * 2.0 * MOB_PI + phase;
+
+    float randomAmount = 0.45 + saturate(C_Random) * 0.55;
+    float randomAmplitude = lerp(0.72, 1.22, randomValue.y) * randomAmount;
+    float amplitudeVariation = lerp(randomAmplitude, 1.0, sync);
+    float amplitude = USER_BASE_SWING_RAD
+                    * (1.0 + saturate(C_Swing) * 0.85)
+                    * amplitudeVariation;
+    float motionFactor = saturate(1.0 - C_StopMotion);
+    // HOW: 軸別モーフは0=基準、1=2倍、-1=その軸だけ停止として扱う。
+    float xAmplitudeControl = max(0.0, 1.0 + C_XSwingAmp);
+    float yAmplitudeControl = max(0.0, 1.0 + C_YSwingAmp);
+    float zAmplitudeControl = max(0.0, 1.0 + C_ZSwingAmp);
+
+    // 基本波へ小さな2倍波を足すと、機械的な等速往復に見えにくい。
+    swingZ = USER_BASE_LEAN_RAD
+           + motionFactor * USER_SWING_Z_SCALE * zAmplitudeControl * amplitude
+           * (sin(t) + 0.16 * sin(t * 2.0 + randomValue.x * MOB_PI));
+    float xPhase = MobBlendAngle(
+        randomValue.y * 2.0 * MOB_PI,
+        groupPhase,
+        sync);
+    swingX = motionFactor * USER_SWING_X_SCALE * xAmplitudeControl * amplitude * 0.20
+           * sin(t * 0.51 + xPhase);
+    float staticFacing = (randomValue.x - 0.5) * 0.80 * (1.0 - 0.72 * sync);
+    float facingPhase = MobBlendAngle(
+        randomValue.z * MOB_PI,
+        groupPhase,
+        sync);
+    facing = staticFacing
+           + motionFactor * USER_SWING_Y_SCALE * yAmplitudeControl * 0.08
+           * sin(t * 0.27 + facingPhase);
+}
+
+
+// HOW: 沈み込み、踏み切り、滞空、着地、復帰を1周期の人間型ジャンプにする。
+float MobHumanJump(float cycle, float cycleDuration, float randomValue)
+{
+    const float crouchEnd = 0.11;
+    const float takeoffPhase = 0.18;
+    const float landingPhase = 0.82;
+    const float landingCrouchEnd = 0.91;
+    float crouchDepth = 0.14 * lerp(0.78, 1.22, randomValue);
+
+    // 踏み切り前に一度腰を落とす。
+    if (cycle < crouchEnd)
+    {
+        return -crouchDepth * MobSmoothStep01(cycle / crouchEnd);
+    }
+
+    // 沈んだ位置から地面高まで伸び上がり、踏み切る。
+    if (cycle < takeoffPhase)
+    {
+        float rise = MobSmoothStep01(
+            (cycle - crouchEnd) / (takeoffPhase - crouchEnd));
+        return -crouchDepth * (1.0 - rise);
+    }
+
+    // 滞空中は初速と標準重力加速度による放物運動だけを使う。
+    if (cycle < landingPhase)
+    {
+        float airborneRatio = landingPhase - takeoffPhase;
+        float airborneTime = cycleDuration * airborneRatio;
+        float elapsed = ((cycle - takeoffPhase) / airborneRatio) * airborneTime;
+        float gravity = USER_GRAVITY_ACCELERATION;
+        float initialVelocity = gravity * airborneTime * 0.5;
+        float ballisticHeight = max(
+            0.0,
+            initialVelocity * elapsed - 0.5 * gravity * elapsed * elapsed);
+        return ballisticHeight * USER_Y_BOB_GRAVITY_SCALE;
+    }
+
+    // 着地直後は衝撃を吸収するよう再び沈み込む。
+    if (cycle < landingCrouchEnd)
+    {
+        float landing = MobSmoothStep01(
+            (cycle - landingPhase) / (landingCrouchEnd - landingPhase));
+        return -crouchDepth * 0.72 * landing;
+    }
+
+    // 次のジャンプまでに通常の手元高へ戻す。
+    float recover = MobSmoothStep01(
+        (cycle - landingCrouchEnd) / (1.0 - landingCrouchEnd));
+    return -crouchDepth * 0.72 * (1.0 - recover);
+}
+
+
+// HOW: 平面内の一様乱数を使い、4000本を再現可能なランダム位置へ置く。
+float3 MobPosition(uint instanceIndex, float4 randomValue)
+{
+    float width = USER_AREA_WIDTH
+                * lerp(1.0, USER_AREA_MORPH_MAX_SCALE, saturate(C_AreaWidth));
+    float depth = USER_AREA_DEPTH
+                * lerp(1.0, USER_AREA_MORPH_MAX_SCALE, saturate(C_AreaDepth));
+
+    float x = (randomValue.x - 0.5) * width;
+    float z = (randomValue.y - 0.5) * depth;
+
+    // 隣接する観客の手の高さを少し相関させ、完全な白色雑音に見えるのを避ける。
+    float groupWave = sin(x * 0.19 + z * 0.13) * 0.12;
+    float handVariation = (randomValue.z - 0.5) * 0.46;
+    float y = USER_HAND_HEIGHT + groupWave + handVariation;
+
+    // HOW: Yゆらぎ0または停止中は、表示へ寄与しないジャンプ計算を省略する。
+    float yBobWeight = saturate(C_YBob);
+    float motionWeight = saturate(1.0 - C_StopMotion);
+    if (yBobWeight > 0.0 && motionWeight > 0.0)
+    {
+        // HOW: 観客ごとに位相と周期の異なる人間型ジャンプを加える。
+        float sync = MobSyncWeight();
+        uint syncGroup = (instanceIndex / 64u) % 8u;
+        float groupCyclePhase = ((float)syncGroup / 8.0) * 0.12;
+        float bpm = MobTempoBpm();
+        float randomBobRate = lerp(0.42, 0.68, randomValue.z);
+        float bobHz = (bpm / 60.0) * lerp(randomBobRate, 0.55, sync);
+        float cycleDuration = 1.0 / max(bobHz, 1.0e-3);
+        float jumpPhase = MobBlendCycle(randomValue.w, groupCyclePhase, sync);
+        float jumpCycle = frac(Dayo::Time / cycleDuration + jumpPhase);
+        float jumpShapeRandom = lerp(randomValue.x, 0.5, sync);
+        float jumpHeight = MobHumanJump(jumpCycle, cycleDuration, jumpShapeRandom);
+        float jumpAmplitudeRandom = lerp(randomValue.y, 0.5, sync);
+        y += jumpHeight
+           * yBobWeight
+           * motionWeight
+           * lerp(0.85, 1.10, jumpAmplitudeRandom);
+    }
+
+    // 2種類目をわずかに後ろへずらし、同一点へ重なる確率をさらに下げる。
+    z += ((instanceIndex & 1u) == 0u) ? -0.07 : 0.07;
+    return float3(x, y, z);
+}
+
+
+#ifdef YRZ_PASS_Main
+
+// HOW: 26頂点で同一の個体値を共有し、乱数・位相・ジャンプを26回繰り返さない。
+groupshared float3 G_InstancePosition;
+groupshared float3 G_SineAngles;
+groupshared float3 G_CosineAngles;
+
+YRZ_NUMTHREADS
+void CS(
+    uint3 id : SV_DispatchThreadID,
+    uint3 groupThreadId : SV_GroupThreadID)
+{
+    uint vertexIndex = id.x;
+
+    // Why not: 想定外の余剰スレッドでOutBufへ書くとGPUメモリを壊すため必ず止める。
+    if (vertexIndex >= (uint)MOB_TOTAL_VERTEX_COUNT)
+    {
+        return;
+    }
+
+    uint instanceIndex = vertexIndex / (uint)MOB_VERTICES_PER_INSTANCE;
+
+    // HOW: グループ先頭だけが1本分の高コスト演算を担当する。
+    if (groupThreadId.x == 0u)
+    {
+        float4 randomValue = MobHash4(instanceIndex);
+        float swingX;
+        float swingZ;
+        float facing;
+        // HOW: 停止モーフ1では、結果が0になる周期演算を省略して静止姿勢だけを残す。
+        if (C_StopMotion >= 1.0)
+        {
+            float sync = MobSyncWeight();
+            swingX = 0.0;
+            swingZ = USER_BASE_LEAN_RAD;
+            facing = (randomValue.x - 0.5) * 0.80 * (1.0 - 0.72 * sync);
+        }
+        else
+        {
+            MobAngles(instanceIndex, randomValue, swingX, swingZ, facing);
+        }
+
+        float3 sineAngles;
+        float3 cosineAngles;
+        sincos(swingX, sineAngles.x, cosineAngles.x);
+        sincos(facing, sineAngles.y, cosineAngles.y);
+        sincos(swingZ, sineAngles.z, cosineAngles.z);
+
+        G_InstancePosition = MobPosition(instanceIndex, randomValue);
+        G_SineAngles = sineAngles;
+        G_CosineAngles = cosineAngles;
+    }
+
+    // Why not: 共有値の書き込み完了前に他頂点が読むと、個体が一瞬崩れる。
+    GroupMemoryBarrierWithGroupSync();
+
+    // HOW: 会場配置をボーン変換より先に作り、全ての親／センターで4000本をまとめて動かす。
+    Dayo::Vertex vertex = Dayo::VB[vertexIndex];
+    vertex.normal = normalize(vertex.normal);
+    vertex.tangent = YRZ::ComputeTBN(vertex.normal)[0];
+
+    // Why not: PMXと定数が不一致でも、範囲外インスタンスを表示しない。
+    if (instanceIndex >= (uint)MOB_INSTANCE_COUNT)
+    {
+        vertex.position = float3(0.0, -1000000.0, 0.0);
+        Dayo::OutBuf[vertexIndex] = vertex;
+        return;
+    }
+
+    // HOW: 共有済み回転を3要素へ適用し、三角関数を頂点ごとに再計算しない。
+    vertex.position = MobRotateCached(vertex.position, G_SineAngles, G_CosineAngles);
+    vertex.normal = normalize(MobRotateCached(vertex.normal, G_SineAngles, G_CosineAngles));
+    vertex.tangent = normalize(MobRotateCached(vertex.tangent, G_SineAngles, G_CosineAngles));
+    vertex.position += G_InstancePosition;
+
+    // Why not: 配置後に座標を直接出力すると、センター移動が会場配置へ反映されない。
+    // HOW: 全頂点はBDEF1なので、親子計算済みボーン行列を最後に1回適用する。
+    Dayo::LBS(vertex, Dayo::Skin[vertexIndex], 1);
+    Dayo::OutBuf[vertexIndex] = vertex;
+}
+
+#endif
