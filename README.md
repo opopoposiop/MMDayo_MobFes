@@ -6,29 +6,15 @@
 
 ## ファイル
 
-- `archive/MobFesPenlight.pmx`
-  - PMX 2.0形式のモデル本体
-  - ペンライト形状2種類、合計4000本
-  - 独立した発光材質4系統
-  - 4系統別の色・発光強度モーフ
-  - 「全ての親」「センター」ボーンによるモデル全体の移動
-  - テンポ、振幅、個体差、配置範囲のモーフ
-- `archive/MobFesPenlight.fxdayo`
-  - 4000本をランダム配置するMikuMikuDayo用デフォーマ
-  - 個体ごとに位相、速さ、振幅、向き、Y方向の上下動を変え、個体差を伴う揺れを作る
-- `archive/MobFesPenlight_2.pmx`
-  - 4000本、4色、全モーフを維持したGPU負荷軽減版モデル
-- `archive/MobFesPenlight_2.fxdayo`
-  - 1本分の動作計算を26頂点で共有するGPU負荷軽減版デフォーマ
-  - 回転三角関数の共有、不要なジャンプ・停止中周期計算の省略に対応
-- `MobFesPenlight_3.pmx`
-  - 4000本、4色、全56モーフを維持し、形状を板ポリゴンへ置き換えたビルボード軽量版モデル
-- `MobFesPenlight_3.fxdayo`
-  - 1本あたり8頂点で動作計算を共有し、グリップ面と発光面をカメラ方向へ向ける軽量版デフォーマ
-- `generate_mob_fes_penlight.mjs`
-  - 通常版、GPU負荷軽減版、ビルボード軽量版のPMXを再生成するソース
-- `validate_mob_fes_penlight.mjs`
-  - 3バージョンのPMX、fxdayo、MMDayo_AL互換条件を検査するソース
+| ファイル | 概要 |
+|---|---|
+| `MobFesPenlight_3.pmx` / `.fxdayo` | 現行のビルボード軽量版。遠景向け。 |
+| `archive/MobFesPenlight.pmx` / `.fxdayo` | 立体形状の通常版。アーカイブ。 |
+| `archive/MobFesPenlight_2.pmx` / `.fxdayo` | 立体形状のGPU負荷軽減版。アーカイブ。 |
+| `generate_mob_fes_penlight.mjs` | 3種類のPMXを生成するソース。 |
+| `validate_mob_fes_penlight.mjs` | PMX・fxdayoの構造を検証するソース。 |
+
+PMXと`.fxdayo`は、同じ名前・番号の組み合わせで使用してください。
 
 ## 基本的な使い方
 
