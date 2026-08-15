@@ -1,6 +1,6 @@
 /**
  * What: 通常版とGPU負荷軽減版のPMX・fxdayo対応関係を検査する。
- * 非エンジニア向けには、最後に「VALID」と表示されれば配布可能な状態。
+ * 非エンジニア向けには、最後に「VALID」と表示されれば構造検証に成功した状態。
  */
 
 import fs from "node:fs";
@@ -15,14 +15,14 @@ import { fileURLToPath } from "node:url";
 const ARTIFACTS = [
   {
     name: "通常版",
-    pmxName: "MobFesPenlight.pmx",
-    fxName: "MobFesPenlight.fxdayo",
+    pmxName: "archive/MobFesPenlight.pmx",
+    fxName: "archive/MobFesPenlight.fxdayo",
     optimized: false,
   },
   {
     name: "GPU負荷軽減版",
-    pmxName: "MobFesPenlight_2.pmx",
-    fxName: "MobFesPenlight_2.fxdayo",
+    pmxName: "archive/MobFesPenlight_2.pmx",
+    fxName: "archive/MobFesPenlight_2.fxdayo",
     optimized: true,
     billboard: false,
   },

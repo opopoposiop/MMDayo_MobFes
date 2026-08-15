@@ -6,19 +6,19 @@
 
 ## ファイル
 
-- `MobFesPenlight.pmx`
+- `archive/MobFesPenlight.pmx`
   - PMX 2.0形式のモデル本体
   - ペンライト形状2種類、合計4000本
   - 独立した発光材質4系統
   - 4系統別の色・発光強度モーフ
   - 「全ての親」「センター」ボーンによるモデル全体の移動
   - テンポ、振幅、個体差、配置範囲のモーフ
-- `MobFesPenlight.fxdayo`
+- `archive/MobFesPenlight.fxdayo`
   - 4000本をランダム配置するMikuMikuDayo用デフォーマ
   - 個体ごとに位相、速さ、振幅、向き、Y方向の上下動を変え、個体差を伴う揺れを作る
-- `MobFesPenlight_2.pmx`
+- `archive/MobFesPenlight_2.pmx`
   - 4000本、4色、全モーフを維持したGPU負荷軽減版モデル
-- `MobFesPenlight_2.fxdayo`
+- `archive/MobFesPenlight_2.fxdayo`
   - 1本分の動作計算を26頂点で共有するGPU負荷軽減版デフォーマ
   - 回転三角関数の共有、不要なジャンプ・停止中周期計算の省略に対応
 - `MobFesPenlight_3.pmx`
@@ -32,14 +32,14 @@
 
 ## 基本的な使い方
 
-1. `MobFesPenlight.pmx` と `MobFesPenlight.fxdayo` を同じフォルダに置きます。
-2. MikuMikuDayoで `MobFesPenlight.pmx` を読み込みます。
+1. `MobFesPenlight_3.pmx` と `MobFesPenlight_3.fxdayo` を同じフォルダに置きます。
+2. MikuMikuDayoで `MobFesPenlight_3.pmx` を読み込みます。
 3. 同名の `.fxdayo` が適用されていることを確認します。
 4. モデルのモーフを調整します。
 
 `.fxdayo` が無効な場合、4000本は原点付近で重なって見えます。これは故障ではなく、配置処理をGPU側へ任せる構造によるものです。
 
-GPU負荷を抑える場合は、手順中のファイル名を `MobFesPenlight_2.pmx` と `MobFesPenlight_2.fxdayo` に読み替えてください。さらに負荷を抑える場合は `MobFesPenlight_3.pmx` と `MobFesPenlight_3.fxdayo` を使用します。PMXとfxdayoは必ず同じ番号の組み合わせにしてください。
+立体形状の通常版やGPU負荷軽減版を使用する場合は、`archive/MobFesPenlight.pmx` と `archive/MobFesPenlight.fxdayo`、または `archive/MobFesPenlight_2.pmx` と `archive/MobFesPenlight_2.fxdayo` を使用してください。PMXとfxdayoは必ず同じ番号の組み合わせにしてください。
 
 複数バージョンを同時に読み込むと、その数だけ4000本が追加描画されます。比較時以外は通常版、`_2`、`_3` のいずれか1つだけを使用します。
 
@@ -204,7 +204,7 @@ GPU負荷を抑える場合は、手順中のファイル名を `MobFesPenlight_
 
 ## ユーザーが変更してよい箇所
 
-`MobFesPenlight.fxdayo` の「ユーザーが変更してよい箇所」にある次の値は、数字だけ変更できます。
+`archive/MobFesPenlight.fxdayo` の「ユーザーが変更してよい箇所」にある次の値は、数字だけ変更できます。
 
 - 基準テンポ
 - 配置の幅と奥行
@@ -237,7 +237,7 @@ node generate_mob_fes_penlight.mjs --billboard
 node validate_mob_fes_penlight.mjs
 ```
 
-1行目は `MobFesPenlight.pmx`、2行目は `MobFesPenlight_2.pmx`、3行目は `MobFesPenlight_3.pmx` を生成します。
+1行目は `archive/MobFesPenlight.pmx`、2行目は `archive/MobFesPenlight_2.pmx`、3行目は `MobFesPenlight_3.pmx` を生成します。
 
 検証成功時は先頭に `VALID` と表示されます。これはPMX・fxdayo・ソース上の構造検証であり、すべての環境での表示品質や性能を保証するものではありません。検証内容は次の通りです。
 
