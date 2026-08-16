@@ -1,4 +1,4 @@
-# モブフェス・ペンライト
+# MobFes penlight for MikuMikuDayo
 
 [MikuMikuDayo](https://github.com/pennennennennennenem/MikuMikuDayo) 向けのライブ会場用ペンライトモデルです。観客の身体は含まず、2種類の形状を合計4000本、平面上へ再現可能な疑似乱数で配置します。
 
