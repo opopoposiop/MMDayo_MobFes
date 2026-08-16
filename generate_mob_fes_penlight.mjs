@@ -2,8 +2,8 @@
  * MobFesPenlight.pmx を標準Node.jsだけで生成する。
  *
  * HOW:
- *   `node generate_mob_fes_penlight.mjs` を実行すると、同じフォルダへPMX 2.0
- *   バイナリを書き出す。外部パッケージは不要。
+ *   `node generate_mob_fes_penlight.mjs` を実行すると、対応する配布フォルダへ
+ *   PMX 2.0バイナリを書き出す。外部パッケージは不要。
  */
 
 import fs from "node:fs";
@@ -39,7 +39,8 @@ const OUTPUT_NAME = BILLBOARD_VARIANT
 // Codex用覚書: PMX 2.0、UTF-16LE、頂点索引4 byte、その他索引1 byteで固定。
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const OUTPUT_PATH = path.join(HERE, OUTPUT_NAME);
+const OUTPUT_DIRECTORY = BILLBOARD_VARIANT ? HERE : path.join(HERE, "archive");
+const OUTPUT_PATH = path.join(OUTPUT_DIRECTORY, OUTPUT_NAME);
 // HOW: ボーン追加時の番号ずれを、頂点ウェイト・モーフ・表示枠へ一括反映する。
 const BONE_INDEX = Object.freeze({
   ROOT: 0,
@@ -545,6 +546,7 @@ function writeDisplayFrame(writer, nameJp, nameEn, special, elements) {
 
 // HOW: PMX全セクションを仕様順に構築し、完成ファイルを書き出す。
 function generate() {
+  fs.mkdirSync(OUTPUT_DIRECTORY, { recursive: true });
   const geometry = buildGeometry();
   const allIndices = [
     ...geometry.handleIndices,
